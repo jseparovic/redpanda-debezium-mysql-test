@@ -1,0 +1,153 @@
+version: '3.5'
+services:
+    
+  test-mysql:
+    container_name: test-mysql
+    hostname: test-mysql
+    image: mysql:latest
+    restart: always
+    command: mysqld --default-authentication-plugin=mysql_native_password --default-time-zone=+00:00
+    environment:
+      MYSQL_USER: ''
+      MYSQL_PASSWORD: ''
+      MYSQL_DATABASE: ''
+      MYSQL_ROOT_PASSWORD: mysql
+    volumes:
+      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+  
+  test-zookeeper:
+    container_name: test-zookeeper
+    hostname: test-zookeeper
+    image: wurstmeister/zookeeper
+    restart: always
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+  
+  test-kafka:
+    container_name: test-kafka
+    hostname: test-kafka
+    image: wurstmeister/kafka
+    restart: always
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_METADATA_MAX_AGE_MS: 5000
+      KAFKA_LOG_CLEANUP_POLICY: 'delete'
+      KAFKA_LOG_RETENTION_MS: -1
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MINS: 5
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_SEGMENT_HOURS: 1
+      KAFKA_LOG_SEGMENT_BYTES: 10485760
+      KAFKA_DEFAULT_MIN_CLEANABLE_DIRTY_RATIO: 0.01
+      KAFKA_DEFAULT_COMPRESSION_TYPE: uncompressed
+      KAFKA_LISTENERS: PLAIN://:9094
+      KAFKA_ADVERTISED_LISTENERS: >-
+        PLAIN://:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAIN:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAIN
+      KAFKA_ZOOKEEPER_CONNECT: test-zookeeper:2181
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAKFA_DEFAULT_REPLICATION_FACTOR: '1'
+      KAKFA_MIN_INSYNC_REPLICAS: '1'
+      LOG4J_LOGGER_KAFKA: DEBUG
+    depends_on:
+      - test-zookeeper
+  
+  test-registry:
+    container_name: test-registry
+    hostname: test-registry
+    image: confluentinc/cp-schema-registry:7.3.0
+    restart: always
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: "test-registry"
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://test-kafka:9094
+      SCHEMA_REGISTRY_KAFKASTORE_LISTENERS: http://0.0.0.0:8081
+    depends_on:
+      - test-zookeeper
+      
+  test-connect:
+    container_name: test-connect
+    hostname: test-connect
+    image: jseparovic/debezium-connect
+    restart: always
+    environment:
+      PUBSUB_CLIENT_ID: core
+      HTTP_PUBSUB_CONNECT: http://localhost:8080
+      BOOTSTRAP_SERVERS: "test-kafka:9094"
+      REST_ADVERTISED_HOST_NAME: test-connect
+      GROUP_ID: core
+      TOPIC_CREATION_DEFAULT_REPLICATION_FACTOR: 1
+      TOPIC_CREATION_DEFAULT_PARTITIONS: 1
+      TOPIC_CREATION_DEFAULT_CLEANUP_POLICY: 'compact'
+      TOPIC_CREATION_DEFAULT_RETENTION_MS: 604800000
+      TOPIC_CREATION_DEFAULT_SEGMENT_MS: 604800000
+      TOPIC_CREATION_DEFAULT_SEGMENT_BYTES: 10485760
+      TOPIC_CREATION_DEFAULT_MIN_CLEANABLE_DIRTY_RATIO: 0.01
+      TOPIC_CREATION_DEFAULT_COMPRESSION_TYPE: 'uncompressed'
+      CONFIG_STORAGE_TOPIC: connect_config
+      OFFSET_STORAGE_TOPIC: connect_offset
+      STATUS_STORAGE_TOPIC: connect_status
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      KAFKA_METADATA_MAX_AGE_MS: 5000
+      CONNECT_KAFKA_METADATA_MAX_AGE_MS: 5000
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_ENHANCED_AVRO_SCHEMA_SUPPORT: "true"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://test-registry:8081
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_AUTO-REGISTER: "true"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_FIND-LATEST: "true"
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_ENHANCED_AVRO_SCHEMA_SUPPORT: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://test-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_AUTO-REGISTER: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_FIND-LATEST: "true"
+      CONNECT_SCHEMA_NAME_ADJUSTMENT_MODE: "arvo"
+    depends_on:
+      - test-kafka
+      - test-mysql
+      
+  test-console:
+    container_name: test-console
+    hostname: test-console
+    #image: docker.redpanda.com/vectorized/console:master-173596f
+    image: docker.redpanda.com/vectorized/console-unstable:master-2c6f266
+    restart: on-failure
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["test-kafka:9094"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://test-registry:8081"]
+        connect:
+          enabled: true
+          clusters:
+            - name: core
+              url: http://test-connect:8083
+    ports:
+      - "9080:8080"
+    depends_on:
+      - test-kafka
+      - test-connect
+
+  test-setup:
+    container_name: test-setup
+    hostname: test-setup
+    image: jseparovic/redpanda-debezium-mysql-test
+    restart: always
+    working_dir: /app
+    command: node dist/tsc
+    environment:
+      PUBSUB_KAFKA: 'test-kafka:9094'
+      PUBSUB_CONNECT: 'http://test-connect:8083'
+      MYSQL_HOST: 'test-mysql'
+      MYSQL_USER: 'root'
+      MYSQL_PASS: 'mysql'
+      MYSQL_PORT: '3306'
+    depends_on:
+      - test-connect
+      - test-mysql
